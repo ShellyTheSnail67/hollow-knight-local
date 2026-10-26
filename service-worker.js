@@ -13,10 +13,18 @@ const APP_SHELL = [
   './TemplateData/progress-bar-empty-light.png',
   './TemplateData/progress-bar-full-dark.png',
   './TemplateData/progress-bar-full-light.png',
-  './StreamingAssets/BuildMetadata.json',
-  './Build/hk.loader.js',
-  './Build/hk.framework.js'
+  './StreamingAssets/BuildMetadata.json'
 ];
+
+const BLACKLIST = [
+  /\/Build\/.+\.(wasm|data)(\.part\d+)?$/i,
+  /\/Build\/hk\.(loader|framework)\.js$/i,
+  /\/StreamingAssets\//i
+];
+
+function shouldBypassCache(url) {
+  return BLACKLIST.some((pattern) => pattern.test(url.pathname));
+}
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -47,6 +55,10 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url);
   if (url.origin !== location.origin) {
+    return;
+  }
+
+  if (shouldBypassCache(url)) {
     return;
   }
 
