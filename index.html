@@ -6,6 +6,7 @@
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Unity WebGL Player | Hollow Knight</title>
+    <base href="./">
     <link rel="shortcut icon" href="TemplateData/favicon.ico">
     <link rel="stylesheet" href="TemplateData/style.css">
     <style>
@@ -40,20 +41,11 @@
         </div>
         <div id="unity-mobile-warning">WebGL builds are not supported on mobile devices.</div>
     </div>
+
     <script>
         const loadingText = document.querySelector('#loading-text');
         const buildRoot = './Build';
         let totalBytes = 0;
-        let loadedBytes = 0;
-
-        async function getSize(url) {
-            try {
-                const res = await fetch(url, { method: 'HEAD' });
-                return parseInt(res.headers.get('Content-Length') || '0', 10);
-            } catch {
-                return 0;
-            }
-        }
 
         function getParts(file, start, end) {
             const parts = [];
@@ -63,29 +55,47 @@
             return parts;
         }
 
-        async function downloadSequentially(urls, onProgress) {
+        async function fetchNoCache(url) {
+            const res = await fetch(url, {
+                cache: 'no-store',
+                credentials: 'omit'
+            });
+            if (!res.ok) {
+                throw new Error(`Failed to fetch ${url}: ${res.status} ${res.statusText}`);
+            }
+            return res;
+        }
+
+        async function getSize(url) {
+            try {
+                const res = await fetchNoCache(url);
+                return Number(res.headers.get('Content-Length') || '0');
+            } catch {
+                return 0;
+            }
+        }
+
+        async function assembleParts(parts, onProgress) {
             const chunks = [];
             let received = 0;
 
-            for (const url of urls) {
-                const response = await fetch(url);
-                if (!response.ok) {
-                    throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
-                }
-
-                const blob = await response.blob();
+            for (const part of parts) {
+                const res = await fetchNoCache(part);
+                const blob = await res.blob();
                 chunks.push(blob);
                 received += blob.size;
-                loadedBytes += blob.size;
+
                 if (onProgress) {
-                    onProgress(received, totalBytes, url);
+                    const mbDone = (received / (1024 * 1024)).toFixed(2);
+                    const mbTotal = (totalBytes / (1024 * 1024)).toFixed(2);
+                    onProgress({ mbDone, mbTotal, part: part.split('/').pop() });
                 }
             }
 
             return new Blob(chunks);
         }
 
-        async function downloadUnityBuild() {
+        async function loadUnityBinarySet() {
             const dataParts = getParts(`${buildRoot}/hk.data`, 1, 42);
             const wasmParts = getParts(`${buildRoot}/hk.wasm`, 1, 2);
             const allParts = [...dataParts, ...wasmParts];
@@ -93,30 +103,31 @@
             const sizes = await Promise.all(allParts.map(getSize));
             totalBytes = sizes.reduce((sum, size) => sum + size, 0);
 
-            const dataUrlObj = await downloadSequentially(dataParts, (received, total, currentUrl) => {
-                const mbDone = (received / (1024 * 1024)).toFixed(2);
-                const mbTotal = (total / (1024 * 1024)).toFixed(2);
-                loadingText.textContent = `LOADING... ${mbDone} MB / ${mbTotal} MB (${currentUrl.split('/').pop()})`;
+            const dataBlob = await assembleParts(dataParts, ({ mbDone, mbTotal, part }) => {
+                loadingText.textContent = `LOADING... ${mbDone} MB / ${mbTotal} MB (${part})`;
             });
 
-            const wasmUrlObj = await downloadSequentially(wasmParts, () => {
-                // keep the data progress UI stable while the wasm is merged in the background
-                const mbDone = (loadedBytes / (1024 * 1024)).toFixed(2);
-                const mbTotal = (totalBytes / (1024 * 1024)).toFixed(2);
-                loadingText.textContent = `LOADING... ${mbDone} MB / ${mbTotal} MB`;
+            const wasmBlob = await assembleParts(wasmParts, ({ mbDone, mbTotal, part }) => {
+                loadingText.textContent = `LOADING... ${mbDone} MB / ${mbTotal} MB (${part})`;
             });
 
             return {
-                dataUrl: URL.createObjectURL(dataUrlObj),
-                codeUrl: URL.createObjectURL(wasmUrlObj),
+                dataUrl: URL.createObjectURL(dataBlob),
+                codeUrl: URL.createObjectURL(wasmBlob)
             };
         }
 
         (async () => {
             try {
-                const { dataUrl, codeUrl } = await downloadUnityBuild();
+                if ('serviceWorker' in navigator) {
+                    const regs = await navigator.serviceWorker.getRegistrations();
+                    for (const reg of regs) {
+                        await reg.unregister();
+                    }
+                }
 
-                const loaderUrl = `${buildRoot}/hk.loader.js`;
+                const { dataUrl, codeUrl } = await loadUnityBinarySet();
+
                 const config = {
                     dataUrl,
                     frameworkUrl: `${buildRoot}/hk.framework.js`,
@@ -125,6 +136,7 @@
                     companyName: 'Team Cherry & Truffled',
                     productName: 'Hollow Knight',
                     productVersion: '1.0',
+                    devicePixelRatio: 1
                 };
 
                 const container = document.querySelector('#unity-container');
@@ -137,25 +149,23 @@
 
                 if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
                     container.className = 'unity-mobile';
-                    config.devicePixelRatio = 1;
                     mobileWarning.style.display = 'block';
-                    setTimeout(() => {
-                        mobileWarning.style.display = 'none';
-                    }, 5000);
+                    setTimeout(() => mobileWarning.style.display = 'none', 5000);
                 } else {
-                    function resizeCanvas() {
+                    const resizeCanvas = () => {
                         canvas.width = window.innerWidth;
                         canvas.height = window.innerHeight;
                         canvas.style.width = window.innerWidth + 'px';
                         canvas.style.height = window.innerHeight + 'px';
-                    }
+                    };
                     resizeCanvas();
                     window.addEventListener('resize', resizeCanvas);
                 }
 
                 loadingBar.style.display = 'block';
+
                 const script = document.createElement('script');
-                script.src = loaderUrl;
+                script.src = `${buildRoot}/hk.loader.js`;
                 script.onload = () => {
                     createUnityInstance(canvas, config, (progress) => {
                         progressBarFull.style.width = `${100 * progress}%`;
@@ -163,25 +173,24 @@
                         loadingText.remove();
                         loadingBar.style.display = 'none';
                         canvas.style.display = 'block';
+
+                        setTimeout(() => {
+                            URL.revokeObjectURL(dataUrl);
+                            URL.revokeObjectURL(codeUrl);
+                        }, 2000);
                     }).catch((message) => {
-                        alert(message);
+                        console.error(message);
+                        alert(String(message));
                     });
                 };
+
                 document.body.appendChild(script);
             } catch (error) {
                 console.error(error);
-                loadingText.textContent = 'ERROR: The game could not be loaded. Please serve the project via a local web server.';
-                alert(error.message || 'The game failed to load.');
+                loadingText.textContent = 'ERROR: failed to load Unity build. Refresh and retry.';
+                alert(error.message || 'Failed to load game');
             }
         })();
-
-        if ('serviceWorker' in navigator) {
-            window.addEventListener('load', () => {
-                navigator.serviceWorker.register('./service-worker.js').catch((error) => {
-                    console.warn('Service worker failed to register:', error);
-                });
-            });
-        }
     </script>
 </body>
 
